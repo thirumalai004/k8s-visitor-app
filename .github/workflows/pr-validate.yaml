@@ -1,0 +1,17 @@
+name: PR-Validate
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render dev overlay
+        run: kubectl kustomize k8s/overlays/dev > /dev/null
+
+      - name: Render prod overlay
+        run: kubectl kustomize k8s/overlays/prod > /dev/null

@@ -1,0 +1,77 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    env:
+      TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check tools
+        run: |
+          docker version --format '{{.Server.Version}}'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          minikube status
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          kubectl get nodes
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build image and load into minikube
+        run: |
+          docker build -t visitor-app:${{ github.sha }} .
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          minikube image load visitor-app:${{ github.sha }}
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Set image tag in the overlay
+        run: |
+          $f = "k8s/overlays/$($env:TARGET_ENV)/kustomization.yaml"
+          (Get-Content $f) -replace 'newTag: .*', 'newTag: ${{ github.sha }}' | Set-Content -Encoding ascii $f
+          Select-String -Path $f -Pattern 'newTag'
+
+      - name: Create namespace and Secret
+        env:
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:REDIS_PASSWORD)) {
+            Write-Error "Add REDIS_PASSWORD under Settings > Secrets and variables > Actions"
+            exit 1
+          }
+          kubectl create namespace $env:TARGET_ENV --dry-run=client -o yaml | kubectl apply -f -
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          kubectl create secret generic redis-secret "--from-literal=REDIS_PASSWORD=$($env:REDIS_PASSWORD)" -n $env:TARGET_ENV --dry-run=client -o yaml | kubectl apply -f -
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Deploy with Kustomize
+        run: |
+          kubectl apply -k "k8s/overlays/$($env:TARGET_ENV)"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          kubectl rollout status deployment/redis -n $env:TARGET_ENV --timeout=120s
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          kubectl rollout status deployment/web -n $env:TARGET_ENV --timeout=120s
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Show result
+        run: |
+          kubectl get all,pvc -n $env:TARGET_ENV
